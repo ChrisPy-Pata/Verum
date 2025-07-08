@@ -1,0 +1,410 @@
+# required libraries/packages
+import re
+import streamlit as st
+import requests
+import os
+import sys
+import asyncio
+from crawl4ai import AsyncWebCrawler
+from bs4 import BeautifulSoup
+from langchain.agents import AgentExecutor, create_tool_calling_agent, tool
+from langchain.tools import tool as structured_tool
+
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.documents import Document
+from keybert import KeyBERT
+import spacy
+
+from dotenv import load_dotenv
+import pandas as pd
+import httpx
+from langchain_groq import ChatGroq
+
+# set the event loop policy for Windows to avoid issues with asyncio
+if sys.platform.startswith('win'):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+# load environment variables
+load_dotenv(".env")
+# you can switch to a different model by changing the MODEL_NAME variable
+MODEL_NAME = "llama-3.3-70b-versatile"
+NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY")
+BRAVEAPI_KEY = os.environ.get("BRAVE_API")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+NEWS_PAGE_SIZE = 10
+FALLACY_CSV = "fallacies.csv"
+fallacies_df = pd.read_csv(FALLACY_CSV)
+FALLACIES_STR = fallacies_df.to_string(index=False)
+
+# load spaCy model with error handling
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    st.error("spaCy English model 'en_core_web_sm' not found. Please install it by running: python -m spacy download en_core_web_sm")
+    st.stop()
+except Exception as e:
+    st.error(f"Error loading spaCy model: {e}")
+    st.stop()
+
+
+# token constants to avoid surpassing request tokens per minute 
+MAX_SCRAPED_LEN = 2000
+MAX_SUMMARY_LEN = 1000
+MAX_NEWS_CONTENT_LEN = 1200
+MAX_ARTICLE_LEN = 1000
+
+url_pattern = r"https?://(?:www\.)?\S+"
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# utility functions
+
+# use Brave Search to find news articles related to the user's input keywords.
+async def brave_search_news(api_key, user_input):
+    """Use Brave Search to find news articles related to the user's input keywords."""
+    query = user_input
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                "https://api.search.brave.com/res/v1/news/search",
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Encoding": "gzip",
+                    "x-subscription-token": api_key
+                },
+                params={
+                    "q": query,
+                    "search_lang": "en",
+                    "ui_lang": "en-US",
+                    "country": "PH",
+                    "safesearch": "off",
+                    "count": "5",
+                    "spellcheck": "true",
+                    "freshness": "pm",
+                    "extra_snippets": "false"
+                }
+            )
+            response.raise_for_status()
+            data = response.json()
+    except Exception as e:
+        st.error(f"Brave API request failed: {e}")
+        return []
+    return data.get("results", [])
+
+# extract keywords and named entities from text using KeyBERT and spaCy
+def extract_keywords_and_entities(text, num_keywords=6):
+    """Extract keywords and named entities from text using KeyBERT and spaCy."""
+    kw_model = KeyBERT('all-MiniLM-L6-v2')
+    keywords = [kw[0] for kw in kw_model.extract_keywords(
+        text, keyphrase_ngram_range=(2, 3), stop_words='english', top_n=num_keywords)]
+    doc = nlp(text)
+    entities = [ent.text for ent in doc.ents if ent.label_ in ("ORG", "GPE", "PERSON", "EVENT")]
+    combined = list(dict.fromkeys(keywords + entities))
+    return combined
+
+# convert news articles to LangChain Document objects
+def news_to_docs(news_articles):
+    """Convert a list of news articles to LangChain Document objects."""
+    docs = []
+    for article in news_articles[:5]:
+        text = f"Title: {article.get('title', '')}\nDescription: {article.get('description', '')}\nContent: {article.get('content', '')}\nSource: {article.get('source', {}).get('name', '')}\nURL: {article.get('url', '')}\npublishedAt: {article.get('publishedAt', '')}"
+        if len(text) > 800:
+            text = text[:800] + "..."
+        docs.append(Document(page_content=text, metadata={"source": "newsapi", "url": article.get("url", "")}))
+    return docs
+
+# fetch news articles from NewsAPI based on the query or keywords
+def fetch_news_articles(api_key, query):
+    """Fetch news articles from the NewsAPI based on the query or keywords."""
+    url = (
+        f"https://newsapi.org/v2/top-headlines?"
+        f"q={query}&country=ph&pageSize={NEWS_PAGE_SIZE}&apiKey={api_key}"
+    )
+    response = requests.get(url)
+    data = response.json()
+    if data.get("status") != "ok":
+        return []
+    return data.get("articles", [])
+
+# filter news articles for relevance to the user input using llm model
+def filter_relevant_articles(user_input: str, docs: list) -> list:
+    """Filter news articles for relevance to the user input using LLM."""
+    if not docs:
+        return []
+    llm = ChatGroq(
+        groq_api_key=GROQ_API_KEY,
+        model_name=MODEL_NAME,
+        temperature=0.1,
+        max_tokens=700,
+    )
+    prompt = (
+        f"User's question/claim: {user_input}\n\n"
+        "Below is a list of news articles. For each one, reply YES if it is relevant to answering or fact-checking the user's question, or NO if not. "
+        "Format your answer as a numbered list with YES or NO and a very short reason if YES.\n"
+    )
+    for idx, doc in enumerate(docs, 1):
+        short_text = doc.page_content[:500].replace('\n', ' ')
+        prompt += f"{idx}. {short_text}\n\n"
+    response = llm.invoke(prompt)
+    response_text = response.content if hasattr(response, "content") else str(response)
+    relevant_docs = []
+    lines = response_text.splitlines()
+    for idx, line in enumerate(lines, 1):
+        line_clean = line.lower().replace(")", ".").replace(":", ".").strip()
+        num_str = f"{idx}."
+        if num_str in line_clean and "yes" in line_clean.split(num_str, 1)[1]:
+            relevant_docs.append(docs[idx-1])
+    return relevant_docs or docs
+
+# tools functions
+
+# scrape the content of a news article from the given URL
+@tool
+async def news_scrape(url: str) -> str:
+    """Scrape the content of a news article from the given URL. Returns the content as a string."""
+    async with AsyncWebCrawler() as crawler:
+        result = await crawler.arun(url)
+        return result
+    
+    
+# scrape the content of a link and summarize it
+@tool
+def summarize_link_content(content: str) -> str:
+    """Summarize the scraped content to get the main claim or topic."""
+    llm = ChatGroq(
+        groq_api_key=GROQ_API_KEY,
+        model_name=MODEL_NAME,
+        temperature=0.1,
+        max_tokens=300,
+    )
+    prompt = (
+        "Summarize this content in 2-3 sentences:\n"
+        "Content: {content}\n\nSummary:"
+    )
+    return llm.invoke(prompt.format(content=content))
+
+# fetch news articles based on keywords extracted from the link summary and/or user input
+@tool
+async def get_news(keywords: str) -> str:
+    """Fetch PHILIPPINES news articles from NewsAPI or Brave Search based on extracted keywords."""
+    news_articles = fetch_news_articles(NEWSAPI_KEY, keywords)
+    if not news_articles:
+        news_articles = await brave_search_news(BRAVEAPI_KEY, keywords)
+    docs = news_to_docs(news_articles)
+    docs_keywords = filter_relevant_articles(keywords, docs)
+    return "\n\n".join([doc.page_content for doc in docs_keywords])
+
+# summarize the fetched news articles
+@tool
+def summarize_news(content: str, fallacies: str) -> str:
+    """Summarize all fetched news articles together."""
+    llm = ChatGroq(
+        groq_api_key=GROQ_API_KEY,
+        model_name=MODEL_NAME,
+        temperature=0.1,
+        max_tokens=400,
+    )
+    prompt = (
+        "You are a communication expert. Summarize the news articles in 3-4 clear sentences.\n"
+        "Articles: {content}\n\nSummary:"
+    )
+    return llm.invoke(prompt.format(content=content))
+
+# analyze the summary for logical fallacies and ethical issues
+@tool
+def analyze_summary(summary: str, fallacies: str) -> str:
+    """Analyze the summary for logical fallacies and ethical issues."""
+    llm = ChatGroq(
+        groq_api_key=GROQ_API_KEY,
+        model_name=MODEL_NAME,
+        temperature=0.1,
+        max_tokens=400,
+    )
+    prompt = (
+        "Analyze this summary for fallacies. Provide:\n"
+        "1. Main fallacy found (if any)\n"
+        "2. Why it might mislead readers\n\n"
+        "Summary: {summary}\n\nAnalysis:"
+    )
+    return llm.invoke(prompt.format(summary=summary))
+
+
+# compare the user's claim with the news summary and analysis
+@tool
+def compare_claim(user_input: str, summary: str, analysis: str, link_content: str) -> str:
+    """Compare the user's original claim and the summary of the link content with the news summary and analysis to determine if the claim is supported, contradicted, or inconclusive."""
+    llm = ChatGroq(
+        groq_api_key=GROQ_API_KEY,
+        model_name=MODEL_NAME,
+        temperature=0.1,
+        max_tokens=400,
+    )
+    prompt = (
+        "Compare the user's claim with news evidence. Provide verdict: Supported, Contradicted, or Inconclusive. Please also explain your verdict in simple terms in 3-5 sentences.\n\n"
+        "User claim: {user_input}\n"
+        "News summary: {summary}\n"
+        "Analysis: {analysis}\n\n"
+        "Verdict:"
+    )
+    return llm.invoke(prompt.format(
+        user_input=user_input,
+        summary=summary,
+        analysis=analysis
+    ))
+
+# agent as tool
+
+# keywords agent - this agent extracts keywords and named entities from the input text using KeyBERT and spaCy
+@structured_tool
+def keywords_agent_tool(text: str) -> str:
+    """Extracts keywords and named entities from the input text using KeyBERT and spaCy."""
+    keywords = extract_keywords_and_entities(text)
+    return ", ".join(keywords)
+
+
+# scrape agent - this agent scrapes a URL from user input(w/wo URL) and summarizes its content
+# If no link is found, it summarizes the user input instead.
+# This is the first step in the workflow.
+@structured_tool
+def scrape_agent_tool(user_input: str) -> str:
+    """Scrape a URL from user input and return a summary of its content. If no link, summarize the user input."""
+    match = re.search(url_pattern, user_input)
+    if not match:
+        summary = summarize_link_content.invoke({"content": user_input})
+        return summary["content"] if isinstance(summary, dict) and "content" in summary else str(summary)
+    url = match.group(0)
+    article = asyncio.run(news_scrape.ainvoke(url))
+    ext_html_text = str(article)
+    ext_soup = BeautifulSoup(ext_html_text, 'html.parser')
+    article_text = ext_soup.get_text(separator='\n', strip=True)
+    summary = summarize_link_content.invoke({"content": article_text})
+    
+    st.markdown("**Link Summary:**")
+    st.write(summary)
+    
+    return summary["content"] if isinstance(summary, dict) and "content" in summary else str(summary)
+
+# news agent - this agent fetches and summarizes PH news articles based on keywords extracted from the link summary and/or user input
+@structured_tool
+def news_agent_tool(keywords: str) -> str:
+    """Fetch and summarize relevant PH news articles for given keywords. If no news, return an empty string."""
+    news_content = asyncio.run(get_news.ainvoke(keywords))
+    if not news_content or not str(news_content).strip():
+        return ""
+    summary = summarize_news.invoke({"content": news_content, "fallacies": FALLACIES_STR})
+    
+    st.markdown("**News Summary:**")
+    st.write(summary)
+    
+    return summary["content"] if isinstance(summary, dict) and "content" in summary else str(summary)
+
+# analysis agent - this agent analyzes the news summary for fallacies and ethical issues
+@structured_tool
+def analysis_agent_tool(news_summary: str) -> str:
+    """Analyze the news summary for fallacies and ethical issues. If no summary, return an empty string."""
+    if not news_summary or not str(news_summary).strip():
+        return ""
+    analysis = analyze_summary.invoke({"summary": news_summary, "fallacies": FALLACIES_STR})
+    
+    st.markdown("**Analysis:**")
+    st.write(analysis)
+    
+    return analysis["content"] if isinstance(analysis, dict) and "content" in analysis else str(analysis)
+
+#  verdict agent - this agent compares the claim and all summaries/analyses and gives a verdict
+@structured_tool
+def verdict_agent_tool(user_input: str, link_summary: str, news_summary: str, analysis: str) -> str:
+    """Compare the claim and all summaries/analyses and give a verdict. If no news, base verdict on user input and link summary only."""
+    try:
+        if not news_summary or not str(news_summary).strip():
+            verdict = "Inconclusive: No relevant news found to verify the claim."
+            return verdict
+        
+        verdict = compare_claim.invoke({
+            "user_input": user_input,
+            "summary": news_summary,
+            "analysis": analysis,
+            "link_content": link_summary
+        })
+        
+        result = verdict.content if hasattr(verdict, 'content') else str(verdict)
+        return result
+    except Exception as e:
+        return f"Error generating verdict: {str(e)}"
+
+# manager agent - this is the main agent that orchestrates the workflow
+def make_manager_agent(tools):
+    llm = ChatGroq(
+        groq_api_key=GROQ_API_KEY,
+        model_name=MODEL_NAME,
+        temperature=0.1,
+        max_tokens=500,
+        max_retries=2,
+    )
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are Verum, an AI assistant that follows this workflow:
+
+1. Step 1: Use scrape_agent_tool to summarize content from user input
+2. Step 2: Use keywords_agent_tool to extract keywords from the summary
+3. Step 3: Use news_agent_tool to find relevant news articles
+4. Step 4: Use analysis_agent_tool to analyze for fallacies (if news found)
+5. Step 5: Use verdict_agent_tool to provide final verdict
+
+Always call tools one at a time and in order. Be concise in your responses."""),
+        ("human", "{user_input}"),
+        ("placeholder", "{agent_scratchpad}"),
+    ])
+    return create_tool_calling_agent(llm, tools, prompt)
+
+
+async def main():
+    st.title("Verum v0.6: AI News Assistant and Fact-Checker")
+    if not NEWSAPI_KEY:
+        st.error("NO API KEY FOUND")
+        return
+    user_input = st.text_input("Enter your news query:")
+    if user_input:
+        with st.spinner("Checking News..."):
+            st.session_state.chat_history.append(HumanMessage(content=user_input))
+            tools = [
+                scrape_agent_tool,
+                keywords_agent_tool,
+                news_agent_tool,
+                analysis_agent_tool,
+                verdict_agent_tool,
+            ]
+            manager_agent = make_manager_agent(tools)
+            manager_executor = AgentExecutor(
+                agent=manager_agent,
+                tools=tools,
+                verbose=True,
+                return_intermediate_steps=True,
+                max_iterations=10,
+                early_stopping_method="generate",
+            )
+            agent_vars = {
+                "user_input": user_input,
+            }
+            
+            try:
+                final_response = await manager_executor.ainvoke(agent_vars)
+                output = final_response.get("output", str(final_response))
+                st.session_state.chat_history.append(AIMessage(content=output))
+                with st.container(height=1000, border=True):
+                    st.markdown("**Verum:**")
+                    st.write(output)
+            # to prevent API errors from breaking the app (like failed generation or function calling)
+            except Exception as e:
+                error_msg = f"An error occurred: {str(e)}"
+                if "Failed to call a function" in str(e):
+                    error_msg = "The AI model encountered an issue with function calling. Please try rephrasing your query or try again."
+                elif "APIError" in str(e):
+                    error_msg = "There was an issue with the AI service. Please try again in a moment."
+                
+                st.error(error_msg)
+                st.session_state.chat_history.append(AIMessage(content=error_msg))
+
+if __name__ == "__main__":
+    asyncio.run(main())

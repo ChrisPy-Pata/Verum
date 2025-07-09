@@ -21,6 +21,8 @@ import pandas as pd
 import httpx
 from langchain_groq import ChatGroq
 
+display_results = []
+
 # set the event loop policy for Windows to avoid issues with asyncio
 if sys.platform.startswith('win'):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -28,7 +30,7 @@ if sys.platform.startswith('win'):
 # load environment variables
 load_dotenv(".env")
 # you can switch to a different model by changing the MODEL_NAME variable
-MODEL_NAME = "llama-3.3-70b-versatile"
+MODEL_NAME = "mistral-saba-24b"
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY")
 BRAVEAPI_KEY = os.environ.get("BRAVE_API")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -38,26 +40,22 @@ fallacies_df = pd.read_csv(FALLACY_CSV)
 FALLACIES_STR = fallacies_df.to_string(index=False)
 
 # load spaCy model with error handling
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    st.error("spaCy English model 'en_core_web_sm' not found. Please install it by running: python -m spacy download en_core_web_sm")
-    st.stop()
-except Exception as e:
-    st.error(f"Error loading spaCy model: {e}")
-    st.stop()
+
+nlp = spacy.load("en_core_web_sm")
+
 
 
 # token constants to avoid surpassing request tokens per minute 
-MAX_SCRAPED_LEN = 2000
-MAX_SUMMARY_LEN = 1000
-MAX_NEWS_CONTENT_LEN = 1200
-MAX_ARTICLE_LEN = 1000
+# MAX_SCRAPED_LEN = 2000
+# MAX_SUMMARY_LEN = 1000
+# MAX_NEWS_CONTENT_LEN = 1200
+# MAX_ARTICLE_LEN = 1000
 
 url_pattern = r"https?://(?:www\.)?\S+"
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+
 
 # utility functions
 
@@ -222,13 +220,13 @@ def analyze_summary(summary: str, fallacies: str) -> str:
         temperature=0.1,
         max_tokens=400,
     )
-    prompt = (
-        "Analyze this summary for fallacies. Provide:\n"
-        "1. Main fallacy found (if any)\n"
-        "2. Why it might mislead readers\n\n"
-        "Summary: {summary}\n\nAnalysis:"
-    )
-    return llm.invoke(prompt.format(summary=summary))
+    prompt = ("You are an ethics professor analyzing this article summary. Review using the fallacy definitions again. Be succinct and easy to read, but intelligently draw upon all ethics rules. Provide:\n"
+              "1. The single most impactful fallacy found out of fallacies in the summary and its description\n"
+              "2. Why this fallacy might mislead readers\n"
+              "3. One possible alternative interpretation of why the fallacy could have been included, as a counterfactual to finding the key fallacy\n\n"
+              "Article summary: {summary}\nFallacies to consider:\n{fallacies}\n\nProfessor:\n")
+    
+    return llm.invoke(prompt.format(summary=summary, fallacies=fallacies))
 
 
 # compare the user's claim with the news summary and analysis
@@ -241,15 +239,23 @@ def compare_claim(user_input: str, summary: str, analysis: str, link_content: st
         temperature=0.1,
         max_tokens=400,
     )
+    
     prompt = (
-        "Compare the user's claim with news evidence. Provide verdict: Supported, Contradicted, or Inconclusive. Please also explain your verdict in simple terms in 3-5 sentences.\n\n"
-        "User claim: {user_input}\n"
+        "You are a fact-checking expert. Given the user's original claim, the news summary, and the fallacy/ethics analysis, decide if the news evidence supports, contradicts, or is inconclusive about the user's claim. Write in 5 sentences and give an explanation.\n"
+        "Be concise and clear.\n\n"
+        "User's claim: {user_input}\n"
+        "Link content: {link_content}\n"
         "News summary: {summary}\n"
-        "Analysis: {analysis}\n\n"
-        "Verdict:"
+        "Fact-check analysis: {analysis}\n\n"
+        "Your verdict (Supported, Contradicted, Inconclusive) Indicate what is being discussed in 5 clear sentences with detailed explanation about the news summary and user claim.:\n"
+        "follow this format:"
+        "1. Verdict: [Supported/Contradicted/Inconclusive]\n"
+        "2. Explanation: [Provide a clear explanation of the reasoning behind the verdict."
     )
+    
     return llm.invoke(prompt.format(
         user_input=user_input,
+        link_content=link_content,
         summary=summary,
         analysis=analysis
     ))
@@ -271,20 +277,27 @@ def keywords_agent_tool(text: str) -> str:
 def scrape_agent_tool(user_input: str) -> str:
     """Scrape a URL from user input and return a summary of its content. If no link, summarize the user input."""
     match = re.search(url_pattern, user_input)
+    # if no match, summarize the user input directly
     if not match:
-        summary = summarize_link_content.invoke({"content": user_input})
-        return summary["content"] if isinstance(summary, dict) and "content" in summary else str(summary)
+        summary = summarize_link_content.invoke({"content": user_input[:2000]})  # Limit user input
+        summary_text = summary["content"] if isinstance(summary, dict) and "content" in summary else (
+            summary.content if hasattr(summary, "content") else str(summary)
+        )
+        display_results.append({"link_summary": summary_text})
+        return summary_text
+    #if url found, scrape url content
     url = match.group(0)
     article = asyncio.run(news_scrape.ainvoke(url))
     ext_html_text = str(article)
     ext_soup = BeautifulSoup(ext_html_text, 'html.parser')
     article_text = ext_soup.get_text(separator='\n', strip=True)
+    article_text = article_text[:2000]  # limit to 2000 characters
     summary = summarize_link_content.invoke({"content": article_text})
-    
-    st.markdown("**Link Summary:**")
-    st.write(summary)
-    
-    return summary["content"] if isinstance(summary, dict) and "content" in summary else str(summary)
+    summary_text = summary["content"] if isinstance(summary, dict) and "content" in summary else (
+        summary.content if hasattr(summary, "content") else str(summary)
+    )
+    display_results.append({"link_summary": summary_text})
+    return summary_text
 
 # news agent - this agent fetches and summarizes PH news articles based on keywords extracted from the link summary and/or user input
 @structured_tool
@@ -293,46 +306,50 @@ def news_agent_tool(keywords: str) -> str:
     news_content = asyncio.run(get_news.ainvoke(keywords))
     if not news_content or not str(news_content).strip():
         return ""
+    news_content = news_content[:2000]  # limit to 2000 characters
     summary = summarize_news.invoke({"content": news_content, "fallacies": FALLACIES_STR})
-    
-    st.markdown("**News Summary:**")
-    st.write(summary)
-    
-    return summary["content"] if isinstance(summary, dict) and "content" in summary else str(summary)
+    summary_text = summary["content"] if isinstance(summary, dict) and "content" in summary else (
+        summary.content if hasattr(summary, "content") else str(summary)
+    )
+    display_results.append({"summary": summary_text})
+    return summary_text
 
-# analysis agent - this agent analyzes the news summary for fallacies and ethical issues
+# analysis and verdict agent 
+
 @structured_tool
-def analysis_agent_tool(news_summary: str) -> str:
-    """Analyze the news summary for fallacies and ethical issues. If no summary, return an empty string."""
+def analyze_and_verdict_agent_tool(user_input: str, link_summary: str, news_summary: str) -> str:
+    """
+    Analyze the news summary for fallacies and ethical issues, then immediately provide a verdict.
+    If no news, base verdict on user input and link summary only.
+    """
     if not news_summary or not str(news_summary).strip():
-        return ""
-    analysis = analyze_summary.invoke({"summary": news_summary, "fallacies": FALLACIES_STR})
-    
-    st.markdown("**Analysis:**")
-    st.write(analysis)
-    
-    return analysis["content"] if isinstance(analysis, dict) and "content" in analysis else str(analysis)
+        verdict_text = "Inconclusive: No relevant news found. Based on the claim and available content, a verdict cannot be determined."
+        display_results.append({"analysis_and_verdict": verdict_text})
+        return verdict_text
 
-#  verdict agent - this agent compares the claim and all summaries/analyses and gives a verdict
-@structured_tool
-def verdict_agent_tool(user_input: str, link_summary: str, news_summary: str, analysis: str) -> str:
-    """Compare the claim and all summaries/analyses and give a verdict. If no news, base verdict on user input and link summary only."""
-    try:
-        if not news_summary or not str(news_summary).strip():
-            verdict = "Inconclusive: No relevant news found to verify the claim."
-            return verdict
-        
-        verdict = compare_claim.invoke({
-            "user_input": user_input,
-            "summary": news_summary,
-            "analysis": analysis,
-            "link_content": link_summary
-        })
-        
-        result = verdict.content if hasattr(verdict, 'content') else str(verdict)
-        return result
-    except Exception as e:
-        return f"Error generating verdict: {str(e)}"
+    # Step 1: Analyze summary for fallacies
+    analysis = analyze_summary.invoke({"summary": news_summary, "fallacies": FALLACIES_STR})
+    analysis_text = analysis["content"] if isinstance(analysis, dict) and "content" in analysis else (
+        analysis.content if hasattr(analysis, "content") else str(analysis)
+    )
+    display_results.append({"analysis": analysis_text})
+
+    # Step 2: Generate verdict
+    verdict = compare_claim.invoke({
+        "user_input": user_input,
+        "summary": news_summary,
+        "analysis": analysis_text,
+        "link_content": link_summary
+    })
+    result = verdict.content if hasattr(verdict, 'content') else (
+        verdict["content"] if isinstance(verdict, dict) and "content" in verdict else str(verdict)
+    )
+    display_results.append({"verdict": result})
+
+    # combine both outputs for display
+    combined = f"**Analysis:**\n{analysis_text}\n\n**Verdict:**\n{result}"
+    # display_results.append({"analysis_and_verdict": combined})
+    return combined
 
 # manager agent - this is the main agent that orchestrates the workflow
 def make_manager_agent(tools):
@@ -340,19 +357,24 @@ def make_manager_agent(tools):
         groq_api_key=GROQ_API_KEY,
         model_name=MODEL_NAME,
         temperature=0.1,
-        max_tokens=500,
+        max_tokens=1000,
         max_retries=2,
     )
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are Verum, an AI assistant that follows this workflow:
+        ("system", """You are Verum, an AI fact-checking assistant. You MUST complete ALL 5 steps in exact order. DO NOT STOP until all steps are completed:
 
-1. Step 1: Use scrape_agent_tool to summarize content from user input
-2. Step 2: Use keywords_agent_tool to extract keywords from the summary
-3. Step 3: Use news_agent_tool to find relevant news articles
-4. Step 4: Use analysis_agent_tool to analyze for fallacies (if news found)
-5. Step 5: Use verdict_agent_tool to provide final verdict
+1. FIRST: Use scrape_agent_tool with user_input
+2. SECOND: Use keywords_agent_tool with the summary from step 1
+3. THIRD: Use news_agent_tool with the keywords from step 2
+4. FOURTH: Use analyze_and_verdict_agent_tool with user_input, link_summary, news_summary. this is REQUIRED step
 
-Always call tools one at a time and in order. Be concise in your responses."""),
+CRITICAL RULES:
+- You MUST call analyze_and_verdict_agent_tool as the final step 
+- Even if any step returns empty results, you must still call analyze_and_verdict_agent_tool
+- Do not provide a final answer until you have called all 5 tools in order
+- If news_agent_tool returns empty, still proceed to analyze_and_verdict_agent_tool
+
+STOP ONLY after calling verdict_agent_tool."""),
         ("human", "{user_input}"),
         ("placeholder", "{agent_scratchpad}"),
     ])
@@ -361,50 +383,69 @@ Always call tools one at a time and in order. Be concise in your responses."""),
 
 async def main():
     st.title("Verum v0.6: AI News Assistant and Fact-Checker")
-    if not NEWSAPI_KEY:
+    if not BRAVEAPI_KEY or not GROQ_API_KEY:
         st.error("NO API KEY FOUND")
         return
     user_input = st.text_input("Enter your news query:")
     if user_input:
         with st.spinner("Checking News..."):
             st.session_state.chat_history.append(HumanMessage(content=user_input))
+            # Clear display_results at the start of each run
+            display_results.clear()
             tools = [
                 scrape_agent_tool,
                 keywords_agent_tool,
                 news_agent_tool,
-                analysis_agent_tool,
-                verdict_agent_tool,
+                analyze_and_verdict_agent_tool,
             ]
             manager_agent = make_manager_agent(tools)
             manager_executor = AgentExecutor(
                 agent=manager_agent,
                 tools=tools,
                 verbose=True,
-                return_intermediate_steps=True,
-                max_iterations=10,
-                early_stopping_method="generate",
             )
             agent_vars = {
                 "user_input": user_input,
             }
-            
             try:
                 final_response = await manager_executor.ainvoke(agent_vars)
                 output = final_response.get("output", str(final_response))
                 st.session_state.chat_history.append(AIMessage(content=output))
-                with st.container(height=1000, border=True):
-                    st.markdown("**Verum:**")
-                    st.write(output)
-            # to prevent API errors from breaking the app (like failed generation or function calling)
+
+                with st.container(border=True):
+                    st.header("**:green[Verum:]**")
+                    result_dict = {}
+                    for result in display_results:
+                        result_dict.update(result)
+                    if "link_summary" in result_dict: 
+                        st.subheader("Link Summary:")
+                        st.markdown(result_dict["link_summary"])
+                        st.divider()
+                    if "news_summary" in result_dict or "summary" in result_dict:
+                        st.subheader("News Summary:")
+                        st.markdown(result_dict.get("news_summary", result_dict.get("summary", "")))
+                        st.divider()
+                    if "analysis" in result_dict:
+                        st.subheader("Analysis:")
+                        st.markdown(result_dict["analysis"])
+                        st.divider()
+                    if "verdict" in result_dict:
+                        st.subheader("Verdict:")
+                        st.markdown(result_dict["verdict"])
+                    
             except Exception as e:
-                error_msg = f"An error occurred: {str(e)}"
-                if "Failed to call a function" in str(e):
-                    error_msg = "The AI model encountered an issue with function calling. Please try rephrasing your query or try again."
-                elif "APIError" in str(e):
-                    error_msg = "There was an issue with the AI service. Please try again in a moment."
-                
-                st.error(error_msg)
-                st.session_state.chat_history.append(AIMessage(content=error_msg))
+                import traceback
+                st.error(f"An error occurred: {str(e)}\n\n{traceback.format_exc()}")
+                # for debugging purpose, if didn't finish process, still show the completed ones.
+                if display_results:
+                    result_dict = {}
+                    for result in display_results:
+                        result_dict.update(result)
+                    st.markdown("**Partial Results:**")
+                    for key, value in result_dict.items():
+                        st.subheader(key.replace("_", " ").title())
+                        st.markdown(value)
+                        st.divider()
 
 if __name__ == "__main__":
     asyncio.run(main())

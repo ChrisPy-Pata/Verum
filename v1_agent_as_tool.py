@@ -30,7 +30,7 @@ if sys.platform.startswith('win'):
 # load environment variables
 load_dotenv(".env")
 # you can switch to a different model by changing the MODEL_NAME variable
-MODEL_NAME = "mistral-saba-24b"
+MODEL_NAME = "llama3-70b-8192"
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY")
 BRAVEAPI_KEY = os.environ.get("BRAVE_API")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -241,16 +241,17 @@ def compare_claim(user_input: str, summary: str, analysis: str, link_content: st
     )
     
     prompt = (
-        "You are a fact-checking expert. Given the user's original claim, the news summary, and the fallacy/ethics analysis, decide if the news evidence supports, contradicts, or is inconclusive about the user's claim. Write in 5 sentences and give an explanation.\n"
+        "You are a fact-checking expert. Given the user's original claim, link content if URL was found on user input, the news summary, and the fallacy/ethics analysis, decide if the news evidence supports, contradicts, or is inconclusive about the user's claim. Write in 5 sentences and give an explanation.\n"
         "Be concise and clear.\n\n"
         "User's claim: {user_input}\n"
         "Link content: {link_content}\n"
         "News summary: {summary}\n"
         "Fact-check analysis: {analysis}\n\n"
-        "Your verdict (Supported, Contradicted, Inconclusive) Indicate what is being discussed in 5 clear sentences with detailed explanation about the news summary and user claim.:\n"
+        "Your verdict (Supported, Contradicted, Inconclusive) Indicate what is being discussed in 5 clear sentences with detailed explanation about the link content, news summary, and user claim. please cross-check the link content and news summary:\n"
         "follow this format:"
-        "1. Verdict: [Supported/Contradicted/Inconclusive]\n"
+        "1. Verdict: **[Supported/Contradicted/Inconclusive]**\n"
         "2. Explanation: [Provide a clear explanation of the reasoning behind the verdict."
+        "3. Key points from cross checking the link content and news summary that support your verdict.\n"
     )
     
     return llm.invoke(prompt.format(
@@ -363,23 +364,22 @@ def make_manager_agent(tools):
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are Verum, an AI fact-checking assistant. You MUST complete ALL 5 steps in exact order. DO NOT STOP until all steps are completed:
 
-1. FIRST: Use scrape_agent_tool with user_input
-2. SECOND: Use keywords_agent_tool with the summary from step 1
-3. THIRD: Use news_agent_tool with the keywords from step 2
-4. FOURTH: Use analyze_and_verdict_agent_tool with user_input, link_summary, news_summary. this is REQUIRED step
+    1. FIRST: Use scrape_agent_tool with user_input
+    2. SECOND: Use keywords_agent_tool with the summary from step 1
+    3. THIRD: Use news_agent_tool with the keywords from step 2
+    4. FOURTH: Use analyze_and_verdict_agent_tool with user_input, link_summary, news_summary. this is REQUIRED step
 
-CRITICAL RULES:
-- You MUST call analyze_and_verdict_agent_tool as the final step 
-- Even if any step returns empty results, you must still call analyze_and_verdict_agent_tool
-- Do not provide a final answer until you have called all 5 tools in order
-- If news_agent_tool returns empty, still proceed to analyze_and_verdict_agent_tool
+    CRITICAL RULES:
+    - You MUST call analyze_and_verdict_agent_tool as the final step 
+    - Even if any step returns empty results, you must still call analyze_and_verdict_agent_tool
+    - Do not provide a final answer until you have called all 5 tools in order
+    - If news_agent_tool returns empty, still proceed to analyze_and_verdict_agent_tool
 
-STOP ONLY after calling verdict_agent_tool."""),
+    STOP ONLY after calling verdict_agent_tool."""),
         ("human", "{user_input}"),
         ("placeholder", "{agent_scratchpad}"),
     ])
     return create_tool_calling_agent(llm, tools, prompt)
-
 
 async def main():
     st.title("Verum v0.6: AI News Assistant and Fact-Checker")
@@ -390,7 +390,7 @@ async def main():
     if user_input:
         with st.spinner("Checking News..."):
             st.session_state.chat_history.append(HumanMessage(content=user_input))
-            # Clear display_results at the start of each run
+            # clear display_results at the start of each run
             display_results.clear()
             tools = [
                 scrape_agent_tool,
@@ -432,6 +432,8 @@ async def main():
                     if "verdict" in result_dict:
                         st.subheader("Verdict:")
                         st.markdown(result_dict["verdict"])
+                    
+                    # st.markdown(output, unsafe_allow_html=True)
                     
             except Exception as e:
                 import traceback

@@ -288,6 +288,14 @@ async def get_news(user_input: str) -> str:
     docs_keywords = filter_relevant_articles(user_input, docs)
     st.write("Relevant Articles (LLM-filtered):", docs_keywords)
     
+    news_url = []
+    
+    for doc in docs_keywords:
+        if doc.metadata and "url" in doc.metadata:
+            news_url.append(doc.metadata["url"])
+    
+    st.write(news_url)        
+    
     return docs_keywords
 
 @tool(parse_docstring=True)

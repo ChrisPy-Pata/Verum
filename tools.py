@@ -7,12 +7,10 @@ import sys
 import asyncio
 from crawl4ai import AsyncWebCrawler
 from bs4 import BeautifulSoup
-from langchain.agents import AgentExecutor, create_tool_calling_agent, tool
+from langchain.agents import tool
 from langchain.tools import tool
-
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.documents import Document
+
 from keybert import KeyBERT
 import spacy
 
@@ -23,6 +21,7 @@ from langchain_groq import ChatGroq
 
 # used for storing the results for each agent step
 display_results = []
+news_articles = []
 
 # set the event loop policy for Windows to avoid issues with asyncio
 if sys.platform.startswith('win'):
@@ -186,6 +185,12 @@ async def get_news(keywords: str) -> str:
         news_articles = await brave_search_news(BRAVEAPI_KEY, keywords)
     docs = news_to_docs(news_articles)
     docs_keywords = filter_relevant_articles(keywords, docs)
+    url_news = []
+    
+    for doc in docs_keywords:
+        if doc.metadata and "url" in doc.metadata:
+            url_news.append(doc.metadata["url"])
+            
     return "\n\n".join([doc.page_content for doc in docs_keywords])
 
 # summarize the fetched news articles
@@ -345,103 +350,3 @@ def analyze_and_verdict_agent_tool(user_input: str, link_summary: str, news_summ
     combined = f"**Analysis:**\n{analysis_text}\n\n**Verdict:**\n{result}"
     # display_results.append({"analysis_and_verdict": combined})
     return combined
-
-# manager agent - this is the main agent that orchestrates the workflow
-def make_manager_agent(tools):
-    llm = ChatGroq(
-        groq_api_key=GROQ_API_KEY,
-        model_name=MODEL_NAME,
-        temperature=0.1,
-        max_tokens=1000,
-        max_retries=2,
-    )
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are Verum, an AI fact-checking assistant. You MUST complete ALL 5 steps in exact order. DO NOT STOP until all steps are completed:
-
-    1. FIRST: Use scrape_agent_tool with user_input
-    2. SECOND: Use keywords_agent_tool with the summary from step 1
-    3. THIRD: Use news_agent_tool with the keywords from step 2
-    4. FOURTH: Use analyze_and_verdict_agent_tool with user_input, link_summary, news_summary. this is REQUIRED step
-
-    CRITICAL RULES:
-    - You MUST call analyze_and_verdict_agent_tool as the final step 
-    - Even if any step returns empty results, you must still call analyze_and_verdict_agent_tool
-    - Do not provide a final answer until you have called all 5 tools in order
-    - If news_agent_tool returns empty, still proceed to analyze_and_verdict_agent_tool
-
-    STOP ONLY after calling verdict_agent_tool."""),
-        ("human", "{user_input}"),
-        ("placeholder", "{agent_scratchpad}"),
-    ])
-    return create_tool_calling_agent(llm, tools, prompt)
-
-async def main():
-    st.title("Verum v0.6: AI News Assistant and Fact-Checker")
-    if not BRAVEAPI_KEY or not GROQ_API_KEY:
-        st.error("NO API KEY FOUND")
-        return
-    user_input = st.text_input("Enter your news query:")
-    if user_input:
-        with st.spinner("Checking News..."):
-            st.session_state.chat_history.append(HumanMessage(content=user_input))
-            # clear display_results at the start of each run
-            display_results.clear()
-            tools = [
-                scrape_agent_tool,
-                keywords_agent_tool,
-                news_agent_tool,
-                analyze_and_verdict_agent_tool,
-            ]
-            manager_agent = make_manager_agent(tools)
-            manager_executor = AgentExecutor(
-                agent=manager_agent,
-                tools=tools,
-                verbose=True,
-            )
-            agent_vars = {
-                "user_input": user_input,
-            }
-            try:
-                final_response = await manager_executor.ainvoke(agent_vars)
-                output = final_response.get("output", str(final_response))
-                st.session_state.chat_history.append(AIMessage(content=output))
-
-                with st.container(border=True):
-                    st.header("**:green[Verum:]**")
-                    result_dict = {}
-                    for result in display_results:
-                        result_dict.update(result)
-                    if "link_summary" in result_dict: 
-                        st.subheader("Link Summary:")
-                        st.markdown(result_dict["link_summary"])
-                        st.divider()
-                    if "news_summary" in result_dict or "summary" in result_dict:
-                        st.subheader("News Summary:")
-                        st.markdown(result_dict.get("news_summary", result_dict.get("summary", "")))
-                        st.divider()
-                    if "analysis" in result_dict:
-                        st.subheader("Analysis:")
-                        st.markdown(result_dict["analysis"])
-                        st.divider()
-                    if "verdict" in result_dict:
-                        st.subheader("Verdict:")
-                        st.markdown(result_dict["verdict"])
-                    
-                    # st.markdown(output, unsafe_allow_html=True)
-                    
-            except Exception as e:
-                import traceback
-                st.error(f"An error occurred: {str(e)}\n\n{traceback.format_exc()}")
-                # for debugging purpose, if didn't finish process, still show the completed ones.
-                if display_results:
-                    result_dict = {}
-                    for result in display_results:
-                        result_dict.update(result)
-                    st.markdown("**Partial Results:**")
-                    for key, value in result_dict.items():
-                        st.subheader(key.replace("_", " ").title())
-                        st.markdown(value)
-                        st.divider()
-
-if __name__ == "__main__":
-    asyncio.run(main())

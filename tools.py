@@ -185,17 +185,25 @@ async def get_news(keywords: str) -> str:
         news_articles = await brave_search_news(BRAVEAPI_KEY, keywords)
     docs = news_to_docs(news_articles)
     docs_keywords = filter_relevant_articles(keywords, docs)
-    url_news = []
     
+    url_news = []
+    page_content = []
+    
+    # for each article, get page content and url
     for doc in docs_keywords:
+        page_content.append(doc.page_content)
         if doc.metadata and "url" in doc.metadata:
             url_news.append(doc.metadata["url"])
-            
-    return "\n\n".join([doc.page_content for doc in docs_keywords])
+    
+    # store each url in display_result for ai model to access
+    if url_news:
+        display_results.append({"news_sources": url_news})
+    
+    return "\n\n".join(page_content)
 
 # summarize the fetched news articles
 @tool
-def summarize_news(content: str, fallacies: str) -> str:
+def summarize_news(content: str) -> str:
     """Summarize all fetched news articles together."""
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY,
@@ -283,7 +291,7 @@ def scrape_agent_tool(user_input: str) -> str:
         summary_text = summary["content"] if isinstance(summary, dict) and "content" in summary else (
             summary.content if hasattr(summary, "content") else str(summary)
         )
-        display_results.append({"link_summary": summary_text})
+        display_results.append({"user_query_summary": summary_text})
         return summary_text
     #if url found, scrape url content
     url = match.group(0)
@@ -296,7 +304,7 @@ def scrape_agent_tool(user_input: str) -> str:
     summary_text = summary["content"] if isinstance(summary, dict) and "content" in summary else (
         summary.content if hasattr(summary, "content") else str(summary)
     )
-    display_results.append({"link_summary": summary_text})
+    display_results.append({"user_query_summary": summary_text})
     return summary_text
 
 # news agent - this agent fetches and summarizes PH news articles based on keywords extracted from the link summary and/or user input
@@ -334,7 +342,7 @@ def analyze_and_verdict_agent_tool(user_input: str, link_summary: str, news_summ
     )
     display_results.append({"analysis": analysis_text})
 
-    # Step 2: Generate verdict
+    # Step 2: Decide verdict
     verdict = compare_claim.invoke({
         "user_input": user_input,
         "summary": news_summary,
@@ -345,8 +353,19 @@ def analyze_and_verdict_agent_tool(user_input: str, link_summary: str, news_summ
         verdict["content"] if isinstance(verdict, dict) and "content" in verdict else str(verdict)
     )
     display_results.append({"verdict": result})
+    
+    # Step 3: Add references from news URLs
+    references = ""
+    for item in display_results:
+        if "news_sources" in item:
+            references = "\n**References:**\n"
+            # use enumerate to number the news sources
+            for i, url in enumerate(item["news_sources"], 1):
+                # in bullet form
+                references += f"• [News Source {i}]({url})\n"
+            break
 
-    # combine both outputs for display
-    combined = f"**Analysis:**\n{analysis_text}\n\n**Verdict:**\n{result}"
+    # combine outputs
+    combined = f"**Analysis:**\n{analysis_text}\n\n**Verdict:**\n{result}{references}"
     # display_results.append({"analysis_and_verdict": combined})
     return combined

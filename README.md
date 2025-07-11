@@ -22,7 +22,7 @@ Verum is a 39-year-old AI journalist with 10 years of fact-checking experience. 
 4. **News Gathering**: Fetches related Philippine news articles
 5. **Analysis & Verdict**: Examines content for fallacies, provides verdict, and overall conclusion.
 
-## Technology Stack
+## Tech Stack
 
 - **Frontend**: Streamlit for interactive web interface
 - **AI Models**: Mainly Groq's Llama 3 70B , but can also use other Groq's API models that supports tool/function tool calling.

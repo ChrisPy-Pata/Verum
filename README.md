@@ -1,6 +1,6 @@
 # Verum: AI News Fact-Checker
 
-Verum is an AI-powered chatbot that helps users verify news claims and detect misinformation in Philippine news and social media posts. Built with a friendly journalist persona, Verum guides users through fact-checking processes using large language model.
+Verum is an AI-powered chatbot that helps users verify news claims and misinformation in Philippine news and social media posts. Built with a friendly journalist persona, Verum guides users through fact-checking processes using large language model.
 
 ## Who is Verum?
 

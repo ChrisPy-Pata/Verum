@@ -2,7 +2,7 @@
 
 Verum is an AI-powered chatbot that helps users verify news claims and detect misinformation in Philippine news and social media posts. Built with a friendly journalist persona, Verum guides users through fact-checking processes using large language model.
 
-## What is Verum?
+## Who is Verum?
 
 Verum is a 39-year-old AI journalist with 10 years of fact-checking experience. It analyzes news claims, scrapes relevant articles, and provides clear verdicts on whether information is accurate, misleading, or inconclusive.
 

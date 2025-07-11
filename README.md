@@ -10,11 +10,9 @@ Verum is a 39-year-old AI journalist with 10 years of fact-checking experience. 
 
 - **News Scraping**: Automatically extracts content from news URLs and summarizes key information
 - **Keyword Extraction**: Uses KeyBERT and spaCy to identify relevant topics and entities
-- **Philippine News Focus**: Fetches news specifically from Philippine sources via NewsAPI and Brave Search
 - **Fallacy Analysis**: Analyzes articles for logical fallacies and ethical issues using predefined criteria
 - **Verdict Analysis**: Provides clear fact-check results (Supported/Contradicted/Inconclusive)
 - **Interactive Chat**: Friendly conversation interface with typewriter effects
-- **Real-time Processing**: Streams results as they become available
 
 ## How It Works
 
@@ -27,7 +25,7 @@ Verum is a 39-year-old AI journalist with 10 years of fact-checking experience. 
 ## Technology Stack
 
 - **Frontend**: Streamlit for interactive web interface
-- **AI Models**: Mainly Groq's Llama 3 70B , but can also use other Groq's models that supports tool/function tool calling.
+- **AI Models**: Mainly Groq's Llama 3 70B , but can also use other Groq's API models that supports tool/function tool calling.
 - **Tools**: LangChain for agent orchestration and tool management
 - **Web Scraping**: Crawl4AI for content extraction
 - **NLP**: KeyBERT and spaCy for keyword and entity extraction
@@ -69,8 +67,8 @@ Fact-checking helps:
 ## Limitations
 
 - Limited to available news sources and APIs
-- Responses depend on data quality and model capabilities
-- May not cover all regional news sources comprehensively
+- Responses depend on data and model capabilities
+- May not cover all news sources comprehensively
 
 ---
 

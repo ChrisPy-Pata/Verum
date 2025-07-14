@@ -27,7 +27,7 @@ Verum is a 39-year-old AI journalist with 10 years of fact-checking experience. 
 ## Tech Stack
 
 - **Frontend**: Streamlit for interactive web interface
-- **AI Models**: Mainly Groq's Llama 3 70B , but can also use other Groq's API models that supports tool/function tool calling.
+- **AI Models**: Mainly Groq's Llama 3 70B , but can also use other Groq's API models that support tool/function tool calling.
 - **Tools**: LangChain for agent orchestration and tool management
 - **Web Scraping**: Crawl4AI for content extraction
 - **NLP**: KeyBERT and spaCy for keyword and entity extraction
@@ -40,7 +40,12 @@ Fact-checking helps:
 - **Prevent Misinformation**: Stops false information from influencing public opinion
 - **Promote Critical Thinking**: Encourages users to verify claims before sharing
 - **Build Media Literacy**: Helps users identify reliable vs unreliable sources
+- 
+## Limitations
 
+- Limited to available news sources and APIs
+- Responses depend on data and model capabilities
+- May not cover all news sources comprehensively
 ## Getting Started
 
 1. Clone the repository  
@@ -65,13 +70,6 @@ Fact-checking helps:
    ```powershell
    streamlit run v1-with-ui.py
    ```
-
-## Limitations
-
-- Limited to available news sources and APIs
-- Responses depend on data and model capabilities
-- May not cover all news sources comprehensively
-
 ---
 
 *Built to combat misinformation and promote factual news consumption in the Philippines.*

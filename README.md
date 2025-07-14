@@ -12,7 +12,7 @@ Verum is a 39-year-old AI journalist with 10 years of fact-checking experience. 
 - **News Scraping**: Automatically extracts content from news URLs and summarizes key information.
 - **Keyword Extraction**: Uses KeyBERT and spaCy to identify relevant topics and entities.
 - **News Gathering**: Utilize NewsAPI or Brave Search API to search for relevant news articles.
-- - **News Summarization**: Summarize relevant news articles.
+- **News Summarization**: Summarize relevant news articles.
 - **Fallacy Analysis**: Analyzes articles for logical fallacies and ethical issues using predefined criteria.
 - **Verdict Analysis**: Provides clear fact-check results (Supported/Contradicted/Inconclusive).
 

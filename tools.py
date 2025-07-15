@@ -66,7 +66,7 @@ async def brave_search_news(api_key, user_input):
                     "x-subscription-token": api_key
                 },
                 params={
-                    "q": query,
+                    "q": query + "News from Philippines",
                     "search_lang": "en",
                     "ui_lang": "en-US",
                     "country": "PH",
@@ -132,16 +132,19 @@ def filter_relevant_articles(user_input: str, docs: list) -> list:
     )
     prompt = (
         f"User's question/claim: {user_input}\n\n"
-        "Below is a list of news articles. For each one, reply YES if it is relevant to answering or fact-checking the user's question, or NO if not. "
+        "Below is a list of news articles. For each one, reply YES if it is relevant to answering or fact-checking the user's question, or NO if not."
         "Format your answer as a numbered list with YES or NO and a very short reason if YES.\n"
     )
     for idx, doc in enumerate(docs, 1):
+        # limit to 500 characters and remove newlines
         short_text = doc.page_content[:500].replace('\n', ' ')
         prompt += f"{idx}. {short_text}\n\n"
     response = llm.invoke(prompt)
+    # parse the response to extract relevant documents
     response_text = response.content if hasattr(response, "content") else str(response)
     relevant_docs = []
     lines = response_text.splitlines()
+    # seperate documents by line and check if they contain the index number and "yes"
     for idx, line in enumerate(lines, 1):
         line_clean = line.lower().replace(")", ".").replace(":", ".").strip()
         num_str = f"{idx}."
@@ -244,7 +247,7 @@ def compare_claim(user_input: str, summary: str, analysis: str, link_content: st
         groq_api_key=GROQ_API_KEY,
         model_name=MODEL_NAME,
         temperature=0.1,
-        max_tokens=400,
+        max_tokens=500,
     )
     
     prompt = (
@@ -254,11 +257,12 @@ def compare_claim(user_input: str, summary: str, analysis: str, link_content: st
         "Link content: {link_content}\n"
         "News summary: {summary}\n"
         "Fact-check analysis: {analysis}\n\n"
-        "Your verdict (Supported, Contradicted, Inconclusive,Under Investigation, Ongoing) Indicate what is being discussed in 5 clear sentences with detailed explanation about the link content, news summary, and user claim. please cross-check the link content and news summary:\n"
+        "Your verdict (Supported, Contradicted, Inconclusive, Under Investigation, Ongoing) Indicate what is being discussed in 5 clear sentences with detailed explanation about the link content, news summary, and user claim. please cross-check the link content and news summary:\n"
         "follow this format:"
-        "1. Verdict: **[Supported/Contradicted/Inconclusive/Under Investigation, Ongoing]**\n"
+        "1. Verdict: **[Supported/Contradicted/Inconclusive]**\n"
         "2. Explanation: [Provide a clear explanation of the reasoning behind the verdict."
         "3. Key points from cross checking the link content and news summary that support your verdict.\n"
+        
     )
     
     return llm.invoke(prompt.format(
@@ -315,7 +319,7 @@ def news_agent_tool(keywords: str) -> str:
     if not news_content or not str(news_content).strip():
         return ""
     news_content = news_content[:2000]  # limit to 2000 characters
-    summary = summarize_news.invoke({"content": news_content, "fallacies": FALLACIES_STR})
+    summary = summarize_news.invoke({"content": news_content})
     summary_text = summary["content"] if isinstance(summary, dict) and "content" in summary else (
         summary.content if hasattr(summary, "content") else str(summary)
     )
@@ -362,7 +366,7 @@ def analyze_and_verdict_agent_tool(user_input: str, link_summary: str, news_summ
             # use enumerate to number the news sources
             for i, url in enumerate(item["news_sources"], 1):
                 # in bullet form
-                references += f"• [News Source {i}]({url})\n"
+                references += f"• {url}\n"
             break
 
     # combine outputs
